@@ -78,16 +78,26 @@ The repo includes three deterministic tasks with distinct difficulty levels:
 - `pattern_manipulation_detection`: learn repeated timing and size signatures.
 - `full_market_surveillance`: balance burst detection, pattern detection, and false-positive control in mixed traffic.
 
-## Baseline Policy
+## Baseline Policies
 
-The baseline policy follows simple surveillance rules:
+The official competition baseline is the LLM-driven policy in [inference.py](/home/casp1an/Code/TradeX1/inference.py). It uses the OpenAI client together with the required environment variables:
+
+- `API_BASE_URL`
+- `MODEL_NAME`
+- `HF_TOKEN`
+
+The rule-based heuristic in [meverse/baseline_policy.py](/home/casp1an/Code/TradeX1/meverse/baseline_policy.py) is kept for two narrower jobs:
+
+- crash fallback if the LLM call fails
+- benchmark comparison to test whether the environment has headroom beyond simple thresholds
+
+The heuristic policy follows simple surveillance rules:
 
 - if pattern score is high and slippage is high, `BLOCK`
+- elif manipulation score is high, `BLOCK`
 - elif burst score or trade frequency is high, `FLAG`
 - elif suspiciousness is moderate, `MONITOR`
 - else `ALLOW`
-
-Implementation lives in [meverse/baseline_policy.py](/d:/TradeX/meverse/baseline_policy.py).
 
 ## Running The Environment
 
@@ -106,7 +116,7 @@ openenv validate
 
 ## Running Inference
 
-The root inference runner is [inference.py](/d:/TradeX/inference.py). It loads the surveillance environment, runs a baseline or OpenAI-backed policy, and prints clean competition-style logs.
+The root inference runner is [inference.py](/home/casp1an/Code/TradeX1/inference.py). It loads the surveillance environment, runs the LLM baseline, and prints clean competition-style logs. If the upstream model call fails, it falls back to the heuristic policy so the run can still complete.
 
 ```bash
 python inference.py
@@ -138,7 +148,7 @@ $env:HF_TOKEN="your-token"
 python inference.py
 ```
 
-If `HF_TOKEN` is not set or the model call fails, the script falls back to a deterministic local baseline.
+If `HF_TOKEN` is not set, the script cannot use the primary LLM baseline and will label the run as `heuristic-fallback`. For submission, the required API variables should be present. The fallback exists to reduce crash risk, not as the intended submitted baseline.
 
 Mode behavior:
 
@@ -161,6 +171,14 @@ Run it with:
 ```bash
 python -m meverse.validation
 ```
+
+To compare the heuristic policy against the official LLM baseline and check whether the environment is too shallow, run:
+
+```bash
+python compare_policies.py
+```
+
+That script is analysis tooling for benchmark quality. It is not the competition inference entrypoint.
 
 ## Verifying Score Range
 

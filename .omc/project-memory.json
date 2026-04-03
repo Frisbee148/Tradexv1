@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1775069417679,
-  "projectRoot": "/home/casp1an/Code/TradeX",
+  "lastScanned": 1775255095453,
+  "projectRoot": "/home/casp1an/Code/TradeX1",
   "techStack": {
     "languages": [],
     "frameworks": [],
@@ -32,32 +32,42 @@
   },
   "customNotes": [],
   "directoryMap": {
-    "venv": {
-      "path": "venv",
+    "__pycache__": {
+      "path": "__pycache__",
       "purpose": null,
       "fileCount": 3,
-      "lastAccessed": 1775069417671,
+      "lastAccessed": 1775255095449,
       "keyFiles": [
-        "pyvenv.cfg"
+        "app.cpython-314.pyc",
+        "client.cpython-314.pyc",
+        "inference.cpython-314.pyc"
       ]
     },
-    "venv/bin": {
-      "path": "venv/bin",
-      "purpose": "Executable scripts",
-      "fileCount": 45,
-      "lastAccessed": 1775069417672,
+    "context": {
+      "path": "context",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1775255095449,
       "keyFiles": [
-        "Activate.ps1",
-        "activate",
-        "activate.csh"
+        "RLiquidity_V3_Project.md",
+        "Requirements.txt",
+        "checklist.txt",
+        "evaluation.txt",
+        "inference.py"
       ]
     },
-    "venv/lib": {
-      "path": "venv/lib",
-      "purpose": "Library code",
-      "fileCount": 0,
-      "lastAccessed": 1775069417672,
-      "keyFiles": []
+    "meverse": {
+      "path": "meverse",
+      "purpose": null,
+      "fileCount": 12,
+      "lastAccessed": 1775255095449,
+      "keyFiles": [
+        "Dockerfile",
+        "README.md",
+        "__init__.py",
+        "baseline_policy.py",
+        "client.py"
+      ]
     }
   },
   "hotPaths": [

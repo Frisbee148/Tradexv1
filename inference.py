@@ -2,18 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Optional
 
-from openai import OpenAI
-
-from meverse import SurveillanceAction, choose_surveillance_action, list_task_names
+from meverse import SurveillanceAction, build_llm_client, list_task_names, load_policy_config, policy_label, select_action
 from meverse.server.meverse_environment import MarketSurveillanceEnvironment
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
-HF_TOKEN = os.getenv("HF_TOKEN", "")
 TASK_NAME = os.getenv("MEVERSE_TASK") or os.getenv("TASK_NAME") or "full_market_surveillance"
 BENCHMARK = "amm-market-surveillance"
 
@@ -39,79 +33,27 @@ def log_end(success: bool, steps: int, rewards: list[float]) -> None:
     print(f"[END] success={str(success).lower()} steps={steps} rewards={reward_text}", flush=True)
 
 
-def llm_action(client: OpenAI, observation) -> str:
-    prompt = {
-        "task": observation.task_name,
-        "step_num": observation.step_num,
-        "max_steps": observation.max_steps,
-        "current_amm_price": observation.current_amm_price,
-        "liquidity_snapshot": observation.liquidity_snapshot,
-        "recent_trade_count": observation.recent_trade_count,
-        "trades_in_window": observation.trades_in_window,
-        "trade_frequency": observation.trade_frequency,
-        "average_trade_size": observation.average_trade_size,
-        "maximum_trade_size": observation.maximum_trade_size,
-        "recent_slippage_impact": observation.recent_slippage_impact,
-        "time_gap_mean": observation.time_gap_mean,
-        "time_gap_min": observation.time_gap_min,
-        "burst_indicator": observation.burst_indicator,
-        "pattern_indicator": observation.pattern_indicator,
-        "suspiciousness_score": observation.suspiciousness_score,
-        "manipulation_score": observation.manipulation_score,
-    }
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        temperature=0.0,
-        max_tokens=8,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a market surveillance controller in a simulated AMM market. "
-                    "Choose exactly one action from ALLOW, FLAG, BLOCK, MONITOR. "
-                    "Return JSON only: {\"action\": \"ALLOW\"}."
-                ),
-            },
-            {"role": "user", "content": json.dumps(prompt, separators=(",", ":"))},
-        ],
-    )
-    content = (response.choices[0].message.content or "").strip()
-    if content.startswith("```"):
-        content = content.replace("```json", "").replace("```", "").strip()
-    try:
-        parsed = json.loads(content)
-        action = str(parsed.get("action", "")).strip().upper()
-        if action in {"ALLOW", "FLAG", "BLOCK", "MONITOR"}:
-            return action
-    except json.JSONDecodeError:
-        pass
-    return choose_surveillance_action(observation)
-
-
-def select_action(observation) -> str:
-    if HF_TOKEN:
-        try:
-            client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
-            return llm_action(client, observation)
-        except Exception:
-            return choose_surveillance_action(observation)
-    return choose_surveillance_action(observation)
-
-
 def main() -> None:
     task_name = TASK_NAME if TASK_NAME in list_task_names() else "full_market_surveillance"
     demo_mode = env_flag("DEMO_MODE", False)
     eval_mode = False if demo_mode else env_flag("EVAL_MODE", True)
+    policy_config = load_policy_config()
+    llm_client = build_llm_client(policy_config)
     env = MarketSurveillanceEnvironment(task=task_name, eval_mode=eval_mode, demo_mode=demo_mode)
     observation = env.reset(task=task_name)
     rewards: list[float] = []
     steps = 0
 
-    log_start(task_name, BENCHMARK, MODEL_NAME)
+    log_start(task_name, BENCHMARK, policy_label(client=llm_client, config=policy_config))
 
     try:
         while not observation.done:
-            final_action = select_action(observation)
+            final_action = select_action(
+                observation,
+                client=llm_client,
+                config=policy_config,
+                allow_fallback=True,
+            )
             observation = env.step(SurveillanceAction(action_type=final_action))
             steps += 1
             reward = float(observation.reward or 0.0)
