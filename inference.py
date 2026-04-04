@@ -15,7 +15,7 @@ from meverse.server.meverse_environment import MarketSurveillanceEnvironment
 load_repo_env()
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 TASK_NAME = os.getenv("MEVERSE_TASK") or os.getenv("TASK_NAME") or "full_market_surveillance"
 BENCHMARK = "amm-market-surveillance"
@@ -71,8 +71,17 @@ def llm_action(client: OpenAI, observation) -> str:
                 "role": "system",
                 "content": (
                     "You are a market surveillance controller in a simulated AMM market. "
-                    "Choose exactly one action from ALLOW, FLAG, BLOCK, MONITOR. "
-                    "Return JSON only: {\"action\": \"ALLOW\"}."
+                    "Your job: detect suspicious bot-like activity and respond decisively, "
+                    "but NEVER penalize normal healthy trading.\n"
+                    "Actions: ALLOW, FLAG, BLOCK, MONITOR.\n"
+                    "Rules (apply in order, stop at first match):\n"
+                    "1. burst_indicator >= 0.70 OR manipulation_score >= 0.70 → BLOCK\n"
+                    "2. suspiciousness_score >= 0.65 AND pattern_indicator >= 0.40 → BLOCK\n"
+                    "3. burst_indicator >= 0.50 AND suspiciousness_score >= 0.60 → FLAG\n"
+                    "4. suspiciousness_score >= 0.55 → MONITOR\n"
+                    "5. Otherwise → ALLOW (this is the safe default for healthy markets)\n"
+                    "IMPORTANT: If suspiciousness_score < 0.55 AND manipulation_score < 0.55, ALWAYS choose ALLOW.\n"
+                    "Return JSON only: {\"action\": \"ALLOW\"}"
                 ),
             },
             {"role": "user", "content": json.dumps(prompt, separators=(",", ":"))},
