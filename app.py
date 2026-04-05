@@ -119,25 +119,15 @@ def _build_space_app() -> gr.Blocks:
     return blocks_app
 
 
-def _make_asgi_app():
-    """Wrap the Gradio Blocks into a launchable ASGI app for uvicorn."""
-    blocks = _build_space_app()
-    # Gradio's launch() returns (app, local_url, share_url).
-    # Calling with prevent_thread_lock=True starts the server internally
-    # but we need the underlying FastAPI app for uvicorn.
-    # Use the blocks' internal FastAPI app instead.
-    gradio_app = gr.routes.App.create_app(blocks)
-    return gradio_app
-
-
 if _app_mode() == "space":
-    # For HF Spaces / uvicorn: expose a proper ASGI app
-    app = _make_asgi_app()
-
     def main() -> None:
+        import traceback
         port = int(os.getenv("PORT", "7860"))
-        # When run directly (python app.py), launch via Gradio
-        space_blocks = _build_space_app()
+        try:
+            space_blocks = _build_space_app()
+        except Exception:
+            traceback.print_exc()
+            raise
         space_blocks.launch(
             server_name="0.0.0.0",
             server_port=port,
@@ -145,6 +135,8 @@ if _app_mode() == "space":
             theme=SPACE_THEME,
             css=SPACE_CSS,
         )
+
+    app = openenv_app
 else:
     app = openenv_app
     main = openenv_main
