@@ -3,8 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import random
+import socket
 from typing import Any
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_CACHE_DIR = os.path.join(APP_DIR, ".cache")
+LOCAL_HF_HOME = os.path.join(LOCAL_CACHE_DIR, "huggingface")
+LOCAL_MPL_DIR = os.path.join(LOCAL_CACHE_DIR, "matplotlib")
+
+# Gradio share links depend on a cached frpc binary under HF_HOME.
+# Keep both caches inside the repo so the app has a writable location.
+os.environ.setdefault("HF_HOME", LOCAL_HF_HOME)
+os.environ.setdefault("MPLCONFIGDIR", LOCAL_MPL_DIR)
+os.makedirs(os.environ["HF_HOME"], exist_ok=True)
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 
 import gradio as gr
 import numpy as np
@@ -1053,12 +1067,57 @@ The environment uses a constant-product AMM (`x * y = k`). Agent actions affect 
     return app
 
 
+def _choose_launch_port(preferred: int = 7860, attempts: int = 20) -> int | None:
+    env_port = os.getenv("GRADIO_SERVER_PORT")
+    if env_port:
+        try:
+            return int(env_port)
+        except ValueError:
+            return None
+
+    for port in range(preferred, preferred + attempts):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("127.0.0.1", port))
+            return port
+        except PermissionError:
+            # Restricted sandboxes may block direct socket probes; fall back to Gradio defaults.
+            return None
+        except OSError:
+            continue
+    return None
+
+
+def _share_launch_options() -> dict[str, Any]:
+    options: dict[str, Any] = {}
+
+    share_server_address = os.getenv("GRADIO_SHARE_SERVER_ADDRESS")
+    if share_server_address:
+        options["share_server_address"] = share_server_address
+
+    share_server_protocol = os.getenv("GRADIO_SHARE_SERVER_PROTOCOL")
+    if share_server_protocol in {"http", "https"}:
+        options["share_server_protocol"] = share_server_protocol
+
+    share_server_tls_certificate = os.getenv("GRADIO_SHARE_SERVER_TLS_CERTIFICATE")
+    if share_server_tls_certificate:
+        options["share_server_tls_certificate"] = share_server_tls_certificate
+
+    return options
+
+
 if __name__ == "__main__":
     app = build_app()
-    app.launch(
+    launch_kwargs = dict(
         server_name="0.0.0.0",
-        server_port=7860,
         theme=THEME,
         css=CUSTOM_CSS,
         share=True,
+        show_error=True,
     )
+    server_port = _choose_launch_port()
+    if server_port is not None:
+        launch_kwargs["server_port"] = server_port
+    launch_kwargs.update(_share_launch_options())
+    app.launch(**launch_kwargs)
