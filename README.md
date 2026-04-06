@@ -162,7 +162,7 @@ A score of `>= 0.6` is considered a passing episode.
 
 ## Tasks
 
-The benchmark includes three deterministic tasks with escalating difficulty. **All three tasks are evaluated independently during hackathon submission** — the OpenEnv harness reads `openenv.yaml`, discovers each task, and runs `inference.py` once per task by setting `MEVERSE_TASK`. You do not need to switch manually for submission; the harness handles it. For local testing, you can select a specific task with `MEVERSE_TASK="burst_detection" python inference.py`.
+The benchmark includes three deterministic tasks with escalating difficulty. **All three tasks are evaluated independently** — the OpenEnv harness reads `openenv.yaml`, discovers each task, and runs `inference.py` once per task by setting `MEVERSE_TASK`. For local testing, you can select a specific task with `MEVERSE_TASK="burst_detection" python inference.py`.
 
 ### `burst_detection` (Easy — 50 steps)
 
