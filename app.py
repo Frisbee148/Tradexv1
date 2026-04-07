@@ -122,19 +122,23 @@ def _build_space_app() -> gr.Blocks:
 if _app_mode() == "space":
     def main() -> None:
         import traceback
+        import uvicorn
         port = int(os.getenv("PORT", "7860"))
         try:
             space_blocks = _build_space_app()
         except Exception:
             traceback.print_exc()
             raise
-        space_blocks.launch(
-            server_name="0.0.0.0",
-            server_port=port,
-            share=False,
+        # Mount Gradio onto the existing FastAPI app so OpenEnv API
+        # endpoints (/reset, /step, /state, etc.) remain accessible.
+        gr.mount_gradio_app(
+            openenv_app,
+            space_blocks,
+            path="/",
             theme=SPACE_THEME,
             css=SPACE_CSS,
         )
+        uvicorn.run(openenv_app, host="0.0.0.0", port=port)
 
     app = openenv_app
 else:
