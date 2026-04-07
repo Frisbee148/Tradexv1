@@ -229,7 +229,16 @@ def main() -> None:
             log_step(step=steps, action=final_action, reward=reward, done=observation.done, error=observation.metadata.get("last_action_error"))
         grade = env.grade()
         success = bool(grade["score"] >= 0.6)
-    except Exception:
+    except KeyboardInterrupt:
+        success = False
+        telemetry.write(
+            "episode_error",
+            {
+                "steps_completed": steps,
+                "rewards": rewards,
+            },
+        )
+    except BaseException:
         success = False
         telemetry.write(
             "episode_error",
@@ -240,7 +249,10 @@ def main() -> None:
         )
         raise
     finally:
-        final_grade = env.grade() if steps > 0 else None
+        try:
+            final_grade = env.grade() if steps > 0 else None
+        except Exception:
+            final_grade = None
         telemetry.write(
             "episode_end",
             {
