@@ -1,5 +1,7 @@
 """FastAPI application for the market surveillance environment."""
 
+import os
+
 from fastapi.responses import RedirectResponse
 
 try:
@@ -24,10 +26,17 @@ app = create_app(
 )
 
 
-@app.get("/")
-def root():
-    """Redirect root to the API docs."""
-    return RedirectResponse(url="/docs")
+def _running_in_hf_space() -> bool:
+    return any(os.getenv(name) for name in ("SPACE_ID", "SPACE_AUTHOR_NAME", "HF_SPACE_ID"))
+
+
+# Only redirect / to /docs when NOT in a HF Space.
+# In Space mode, Gradio is mounted at / by app.py.
+if not _running_in_hf_space():
+    @app.get("/")
+    def root():
+        """Redirect root to the API docs."""
+        return RedirectResponse(url="/docs")
 
 
 def main(host: str = "0.0.0.0", port: int = 7860):
