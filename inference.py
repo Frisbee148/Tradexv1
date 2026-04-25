@@ -11,13 +11,13 @@ from typing import Any, Optional
 from openai import OpenAI
 
 from meverse.env import load_repo_env
-from meverse import SurveillanceAction, choose_surveillance_action, list_task_names
+from meverse import SurveillanceAction, list_task_names
 from meverse.server.meverse_environment import MarketSurveillanceEnvironment
 
 load_repo_env()
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 TASK_NAME = os.getenv("MEVERSE_TASK") or os.getenv("TASK_NAME") or "full_market_surveillance"
 BENCHMARK = "amm-market-surveillance"
@@ -162,24 +162,29 @@ def llm_action(client: OpenAI, observation) -> str:
     content = (response.choices[0].message.content or "").strip()
     if content.startswith("```"):
         content = content.replace("```json", "").replace("```", "").strip()
-    try:
-        parsed = json.loads(content)
-        action = str(parsed.get("action", "")).strip().upper()
-        if action in {"ALLOW", "FLAG", "BLOCK", "MONITOR"}:
-            return action
-    except Exception:
-        pass
-    return choose_surveillance_action(observation)
+    parsed = json.loads(content)
+    action = str(parsed.get("action", "")).strip().upper()
+    if action in {"ALLOW", "FLAG", "BLOCK", "MONITOR"}:
+        return action
+    raise ValueError(f"LLM returned invalid action: {action!r}")
 
 
 def select_action(observation) -> str:
-    if HF_TOKEN:
+    if not HF_TOKEN:
+        raise RuntimeError(
+            "HF_TOKEN is required. Set it in .env or as an environment variable."
+        )
+    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    last_err = None
+    for attempt in range(3):
         try:
-            client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
             return llm_action(client, observation)
-        except Exception:
-            return choose_surveillance_action(observation)
-    return choose_surveillance_action(observation)
+        except Exception as exc:
+            last_err = exc
+            err_str = str(exc)
+            if "402" in err_str or "401" in err_str or "403" in err_str:
+                raise RuntimeError(f"API error (non-recoverable): {err_str}") from exc
+    raise RuntimeError(f"LLM failed after 3 attempts: {last_err}") from last_err
 
 
 def run_task(task_name: str) -> None:
@@ -193,13 +198,13 @@ def run_task(task_name: str) -> None:
     steps = 0
     score = 0.0
 
-    log_start(task_name, BENCHMARK, MODEL_NAME if HF_TOKEN else "heuristic-fallback")
+    log_start(task_name, BENCHMARK, MODEL_NAME)
     telemetry.write(
         "episode_start",
         {
             "task": task_name,
             "benchmark": BENCHMARK,
-            "model": MODEL_NAME if HF_TOKEN else "heuristic-fallback",
+            "model": MODEL_NAME,
             "initial_observation": build_signal_snapshot(observation),
             "environment": env.debug_snapshot(),
         },

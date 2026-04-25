@@ -2,26 +2,29 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from typing import Dict
 
-from .baseline_policy import choose_surveillance_action
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from inference import select_action
+
 from .models import SurveillanceAction
 from .server.meverse_environment import MarketSurveillanceEnvironment
 from .tasks import list_task_names
-
 
 def run_task(task_name: str) -> Dict[str, float]:
     env = MarketSurveillanceEnvironment(task=task_name)
     observation = env.reset(task=task_name)
     while not observation.done:
-        action = choose_surveillance_action(observation)
+        action = select_action(observation)
         observation = env.step(SurveillanceAction(action_type=action))
     return env.grade()
 
 
 def run_validation_suite() -> Dict[str, Dict[str, float]]:
     results: Dict[str, Dict[str, float]] = {}
-    print("Running task validation...")
+    print("Running task validation (LLM policy)...")
     for task_name in list_task_names():
         grade = run_task(task_name)
         score = grade["score"]
