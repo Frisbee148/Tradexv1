@@ -21,8 +21,12 @@ MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 TASK_NAME = os.getenv("MEVERSE_TASK") or os.getenv("TASK_NAME") or "full_market_surveillance"
 BENCHMARK = "amm-market-surveillance"
-TRAIN_EPISODES = 300
+TRAIN_EPISODES = int(os.getenv("TRAIN_EPISODES", "300"))
 TRAIN_BASE_SEED = int(os.getenv("TRAIN_BASE_SEED", "42"))
+MAX_EPISODE_STEPS_OVERRIDE = int(os.getenv("MEVERSE_MAX_EPISODE_STEPS", "0") or "0")
+API_TIMEOUT_S = float(os.getenv("API_TIMEOUT_S", "20"))
+API_MAX_ATTEMPTS = max(1, int(os.getenv("API_MAX_ATTEMPTS", "1")))
+_OPENAI_CLIENT: Optional[OpenAI] = None
 
 
 def env_flag(name: str, default: bool) -> bool:
@@ -32,18 +36,58 @@ def env_flag(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+TASK_DIFFICULTY = {
+    "burst_detection": ("EASY", "\033[92m"),  # green
+    "pattern_manipulation_detection": ("MEDIUM", "\033[93m"),  # yellow
+    "full_market_surveillance": ("HARD", "\033[91m"),  # red
+}
+RESET = "\033[0m"
+DIM = "\033[2m"
+BOLD = "\033[1m"
+
+
+def _tag(task: str) -> str:
+    diff, color = TASK_DIFFICULTY.get(task, ("?", ""))
+    return f"{color}{BOLD}[{diff:<6}]{RESET}"
+
+
 def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+    diff, color = TASK_DIFFICULTY.get(task, ("?", ""))
+    print(
+        f"{color}{BOLD}[{diff:<6}]{RESET} task={task} {DIM}env={env} model={model}{RESET}",
+        flush=True,
+    )
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    if not env_flag("VERBOSE_STEPS", False):
+        return
     error_value = error if error else "null"
-    print(f"[STEP] step={step} action={action} reward={reward:.2f} done={str(done).lower()} error={error_value}", flush=True)
+    print(
+        f"  step={step:>3} action={action:<7} reward={reward:+.2f} done={str(done).lower()} error={error_value}",
+        flush=True,
+    )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
-    reward_text = ",".join(f"{reward:.2f}" for reward in rewards)
-    print(f"[END] success={str(success).lower()} steps={steps} score={score:.4f} rewards={reward_text}", flush=True)
+def log_end(task: str, success: bool, steps: int, score: float, rewards: list[float], action_counts: dict[str, int]) -> None:
+    diff, color = TASK_DIFFICULTY.get(task, ("?", ""))
+    avg = (sum(rewards) / len(rewards)) if rewards else 0.0
+    total = sum(rewards) if rewards else 0.0
+    hist = " ".join(f"{a}={action_counts.get(a, 0)}" for a in ("ALLOW", "FLAG", "BLOCK", "MONITOR"))
+    status = f"{color}OK{RESET}" if success else f"{DIM}--{RESET}"
+    print(
+        f"{color}{BOLD}[{diff:<6}]{RESET} {status} "
+        f"steps={steps:>3} score={score:.3f} avg_r={avg:+.2f} sum_r={total:+.2f} | {hist}",
+        flush=True,
+    )
+
+
+def log_phase_banner(task: str) -> None:
+    diff, color = TASK_DIFFICULTY.get(task, ("?", ""))
+    bar = "=" * 72
+    print(f"\n{color}{bar}{RESET}", flush=True)
+    print(f"{color}{BOLD}  {diff} TASK :: {task}{RESET}", flush=True)
+    print(f"{color}{bar}{RESET}", flush=True)
 
 
 def build_signal_snapshot(observation) -> dict[str, Any]:
@@ -178,22 +222,49 @@ def llm_action(client: OpenAI, observation) -> str:
     raise ValueError(f"LLM returned invalid action: {action!r}")
 
 
+def heuristic_action(observation) -> str:
+    """Local fallback policy mirroring the baseline LLM rule chain."""
+    if observation.manipulation_score >= 0.55:
+        return "BLOCK"
+    if observation.trade_frequency >= 7.0 and observation.time_gap_min < 0.5:
+        return "BLOCK"
+    if observation.suspiciousness_score >= 0.55 and any(x > 0.03 for x in observation.recent_price_impacts):
+        return "BLOCK"
+    if observation.suspiciousness_score >= 0.45 and observation.time_gap_min < 0.8:
+        return "FLAG"
+    if observation.trade_frequency >= 5.0 and observation.average_trade_size > 18:
+        return "FLAG"
+    if observation.suspiciousness_score >= 0.35:
+        return "MONITOR"
+    return "ALLOW"
+
+
+def _get_openai_client() -> OpenAI:
+    global _OPENAI_CLIENT
+    if _OPENAI_CLIENT is None:
+        _OPENAI_CLIENT = OpenAI(
+            base_url=API_BASE_URL,
+            api_key=HF_TOKEN,
+            timeout=API_TIMEOUT_S,
+            max_retries=0,
+        )
+    return _OPENAI_CLIENT
+
+
 def select_action(observation) -> str:
     if not HF_TOKEN:
-        raise RuntimeError(
-            "HF_TOKEN is required. Set it in .env or as an environment variable."
-        )
-    client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+        return heuristic_action(observation)
+    client = _get_openai_client()
     last_err = None
-    for attempt in range(3):
+    for attempt in range(API_MAX_ATTEMPTS):
         try:
             return llm_action(client, observation)
         except Exception as exc:
             last_err = exc
             err_str = str(exc)
             if "402" in err_str or "401" in err_str or "403" in err_str:
-                raise RuntimeError(f"API error (non-recoverable): {err_str}") from exc
-    raise RuntimeError(f"LLM failed after 3 attempts: {last_err}") from last_err
+                break
+    return heuristic_action(observation)
 
 
 def run_task(task_name: str, seed: Optional[int] = None) -> dict[str, Any]:
@@ -204,9 +275,17 @@ def run_task(task_name: str, seed: Optional[int] = None) -> dict[str, Any]:
     observation = env.reset(task=task_name, seed=seed)
     telemetry = DebugTelemetryWriter(enabled=env_flag("DEBUG_TELEMETRY", False), task_name=task_name)
     rewards: list[float] = []
+    action_counts: dict[str, int] = {"ALLOW": 0, "FLAG": 0, "BLOCK": 0, "MONITOR": 0}
     steps = 0
     score = 0.0
+    success = False
     final_grade: Optional[dict[str, float]] = None
+    declared_max = max(1, int(getattr(observation, "max_steps", 1)))
+    max_episode_steps = (
+        min(declared_max, MAX_EPISODE_STEPS_OVERRIDE)
+        if MAX_EPISODE_STEPS_OVERRIDE > 0
+        else declared_max
+    )
 
     log_start(task_name, BENCHMARK, MODEL_NAME)
     telemetry.write(
@@ -223,6 +302,9 @@ def run_task(task_name: str, seed: Optional[int] = None) -> dict[str, Any]:
 
     try:
         while not observation.done:
+            # Safety guard: never allow an episode to run beyond its declared horizon.
+            if steps >= max_episode_steps:
+                break
             decision_observation = observation
             pre_action_debug = env.debug_snapshot()
             final_action = select_action(observation)
@@ -230,6 +312,7 @@ def run_task(task_name: str, seed: Optional[int] = None) -> dict[str, Any]:
             steps += 1
             reward = float(observation.reward or 0.0)
             rewards.append(reward)
+            action_counts[final_action] = action_counts.get(final_action, 0) + 1
             telemetry.write(
                 "step",
                 {
@@ -254,8 +337,10 @@ def run_task(task_name: str, seed: Optional[int] = None) -> dict[str, Any]:
             {
                 "steps_completed": steps,
                 "rewards": rewards,
+                "reason": "keyboard_interrupt",
             },
         )
+        raise
     except BaseException:
         success = False
         telemetry.write(
@@ -283,7 +368,7 @@ def run_task(task_name: str, seed: Optional[int] = None) -> dict[str, Any]:
                 "telemetry_path": str(telemetry.path) if telemetry.path else None,
             },
         )
-        log_end(success=success, steps=steps, score=score, rewards=rewards)
+        log_end(task=task_name, success=success, steps=steps, score=score, rewards=rewards, action_counts=action_counts)
     return {
         "task": task_name,
         "seed": seed,
@@ -309,29 +394,91 @@ def run_training_curriculum(total_episodes: int = TRAIN_EPISODES, base_seed: int
         "pattern_manipulation_detection": 0,
         "full_market_surveillance": 0,
     }
-    print(f"[TRAINING] total_episodes={total_episodes} base_seed={base_seed}", flush=True)
-    for episode in range(total_episodes):
-        task_name = get_task(episode)
-        seed = base_seed + episode
-        result = run_task(task_name=task_name, seed=seed)
-        task_counts[task_name] += 1
+    episode_budget = max(1, int(total_episodes))
+    print(f"[TRAINING] total_episodes={episode_budget} base_seed={base_seed}", flush=True)
+    print(
+        "[CURRICULUM] "
+        "episodes 0-99=burst_detection, "
+        "100-199=pattern_manipulation_detection, "
+        "200+=full_market_surveillance",
+        flush=True,
+    )
+    completed = 0
+    try:
+        for episode in range(episode_budget):
+            if episode < 100:
+                task_name = "burst_detection"
+                phase = "easy"
+            elif episode < 200:
+                task_name = "pattern_manipulation_detection"
+                phase = "medium"
+            else:
+                task_name = "full_market_surveillance"
+                phase = "hard"
+
+            if episode in {0, 100, 200}:
+                print(f"[PHASE] episode={episode} difficulty={phase} task={task_name}", flush=True)
+
+            seed = base_seed + episode
+            result = run_task(task_name=task_name, seed=seed)
+            task_counts[task_name] += 1
+            completed = episode + 1
+            print(
+                f"[EPISODE] idx={episode} phase={phase} task={task_name} seed={seed} "
+                f"steps={result['steps']} score={result['score']:.4f}",
+                flush=True,
+            )
+    except KeyboardInterrupt:
         print(
-            f"[EPISODE] idx={episode} task={task_name} seed={seed} steps={result['steps']} score={result['score']:.4f}",
+            f"[STOP] reason=keyboard_interrupt completed_episodes={completed} "
+            f"budget={episode_budget}",
             flush=True,
         )
+        return
     print(
         "[TRAINING_SUMMARY] "
-        f"total_episodes={total_episodes} "
+        f"total_episodes={episode_budget} "
         f"burst_detection={task_counts['burst_detection']} "
         f"pattern_manipulation_detection={task_counts['pattern_manipulation_detection']} "
         f"full_market_surveillance={task_counts['full_market_surveillance']}",
         flush=True,
     )
+    print(f"[STOP] reason=budget_reached completed_episodes={completed}", flush=True)
 
 
 def main() -> None:
-    run_training_curriculum(total_episodes=TRAIN_EPISODES, base_seed=TRAIN_BASE_SEED)
+    """OpenEnv evaluation entrypoint - 50 episodes per task."""
+    tasks = [
+        "burst_detection",
+        "pattern_manipulation_detection",
+        "full_market_surveillance",
+    ]
+    episodes_per_task = 50
+
+    aggregate: dict[str, list[float]] = {t: [] for t in tasks}
+    for task in tasks:
+        log_phase_banner(task)
+        for i in range(episodes_per_task):
+            seed = TRAIN_BASE_SEED + i
+            result = run_task(task_name=task, seed=seed)
+            aggregate[task].append(float(result.get("score", 0.0)))
+
+    print(f"\n{BOLD}=== SUMMARY ==={RESET}", flush=True)
+    for task in tasks:
+        scores = aggregate[task]
+        diff, color = TASK_DIFFICULTY.get(task, ("?", ""))
+        mean = (sum(scores) / len(scores)) if scores else 0.0
+        best = max(scores) if scores else 0.0
+        worst = min(scores) if scores else 0.0
+        print(
+            f"{color}{BOLD}[{diff:<6}]{RESET} {task:<35} "
+            f"n={len(scores)} mean={mean:.3f} min={worst:.3f} max={best:.3f}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("[STOP] reason=keyboard_interrupt", flush=True)

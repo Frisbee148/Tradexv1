@@ -110,6 +110,22 @@ def create_amm_state(task_name: str) -> AMMState:
     return AMMState(bot_confidence=task.initial_bot_confidence)
 
 
+# [MULTI-AGENT ADDITION] Sync episode count to agent pool
+def sync_agent_pool_on_reset(state: AMMState, seed: int, episode_count: int) -> int:
+    next_episode = episode_count
+    try:
+        amm = getattr(state, "_amm", getattr(state, "amm", getattr(state, "pool", state)))
+        if amm is not None and hasattr(amm, "agent_pool") and amm.agent_pool is not None:
+            episode = getattr(amm, "_current_episode", episode_count)
+            amm._current_episode = episode
+            amm._current_seed = seed
+            amm.agent_pool.reset(episode=episode, seed=seed)
+            next_episode = episode + 1
+    except Exception:
+        pass
+    return next_episode
+
+
 def generate_initial_step(state: AMMState, rng: random.Random, profile: str) -> ScenarioStep:
     """Generate the first observation step from a fresh AMM state."""
     d = generate_step_from_state(state, rng, profile)

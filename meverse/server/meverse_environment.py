@@ -20,6 +20,7 @@ try:
         generate_initial_step,
         generate_next_step,
         list_task_names,
+        sync_agent_pool_on_reset,
         task_definition,
     )
 except ImportError:
@@ -32,6 +33,7 @@ except ImportError:
         generate_initial_step,
         generate_next_step,
         list_task_names,
+        sync_agent_pool_on_reset,
         task_definition,
     )
 
@@ -81,6 +83,8 @@ class MarketSurveillanceEnvironment(Environment[SurveillanceAction, Surveillance
         self._actions: List[str] = []
         self._labels: List[str] = []
         self._rewards: List[float] = []
+        self._episode_count = 0
+        self._episode_seed = self._seed
 
     def reset(self, seed: Optional[int] = None, episode_id: Optional[str] = None, **kwargs: Any) -> SurveillanceObservation:
         task = kwargs.get("task")
@@ -90,6 +94,10 @@ class MarketSurveillanceEnvironment(Environment[SurveillanceAction, Surveillance
         self._seed = seed if seed is not None else (42 if self._eval_mode else random.randint(0, 100000))
         self._rng = random.Random(self._seed)
         self._amm = create_amm_state(self._task_name)
+        self._amm._current_episode = self._episode_count
+        self._amm._current_seed = self._seed
+        self._episode_count = sync_agent_pool_on_reset(self._amm, self._seed, self._episode_count)
+        self._episode_seed = self._seed
         self._current_step_data = generate_initial_step(self._amm, self._rng, self._task.profile)
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
         self._step_num = 0
@@ -252,6 +260,8 @@ class MarketSurveillanceEnvironment(Environment[SurveillanceAction, Surveillance
                 "amm_price": round(self._amm.price, 4),
                 "amm_liquidity": round(self._amm.liquidity, 4),
                 "bot_confidence": round(self._amm.bot_confidence, 4),
+                "active_agents": getattr(self._amm, "_active_agents", []),
+                "manipulator_stage": getattr(self._amm, "_manipulator_stage", 1),
                 # Internal telemetry — not exposed as first-class observation
                 # fields. Kept here for dashboard visualisation, debugging,
                 # and downstream tooling. Agents must not consume these.

@@ -7,6 +7,14 @@ import random
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+# [MULTI-AGENT ADDITION]
+try:
+    from tradex.agents import AgentPool
+
+    _AGENT_POOL_AVAILABLE = True
+except ImportError:
+    _AGENT_POOL_AVAILABLE = False
+
 
 @dataclass
 class AMMState:
@@ -18,6 +26,26 @@ class AMMState:
     volatility: float = 0.05
     health_index: float = 0.95
     step: int = 0
+    # [MULTI-AGENT ADDITION]
+    agent_pool: Optional["AgentPool"] = None
+    _active_agents: List[str] = field(default_factory=list)
+    _manipulator_stage: int = 1
+    _current_episode: int = 0
+    _current_seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        # [MULTI-AGENT ADDITION] Multi-agent pool
+        try:
+            if _AGENT_POOL_AVAILABLE:
+                self.agent_pool = AgentPool(episode=0)
+            else:
+                self.agent_pool = None
+            self._active_agents = []
+            self._manipulator_stage = 1
+            self._current_episode = 0
+            self._current_seed = None
+        except Exception:
+            pass
 
     @property
     def k(self) -> float:
@@ -169,6 +197,29 @@ def generate_step_from_state(
         gaps = [round(rng.uniform(3.0, 9.0), 4) for _ in range(5)]
         impacts = [round(rng.uniform(0.002, 0.010), 4) for _ in range(5)]
 
+    # [MULTI-AGENT ADDITION] Blend agent signals into observation
+    try:
+        if state.agent_pool is not None:
+            _agent_signals = state.agent_pool.get_signals(
+                price=getattr(state, "price", 100.0),
+                step_num=getattr(state, "step", 0),
+                is_suspicious_step=bot_active,
+            )
+            # 70/30 blend — existing simulation stays dominant
+            burst = min(1.0, burst * 0.70 + _agent_signals["burst_boost"] * 0.30)
+            pattern = min(1.0, pattern * 0.70 + _agent_signals["pattern_boost"] * 0.30)
+            manipulation = min(1.0, manipulation * 0.70 + _agent_signals["manipulation_boost"] * 0.30)
+
+            dominant_trade_size = float(_agent_signals["dominant_trade_size"])
+            dominant_time_gap = float(_agent_signals["dominant_time_gap"])
+            trades = [round(t * 0.70 + dominant_trade_size * 0.30, 4) for t in trades]
+            gaps = [round(max(0.05, g * 0.70 + dominant_time_gap * 0.30), 4) for g in gaps]
+
+            state._active_agents = list(_agent_signals["active_agents"])
+            state._manipulator_stage = int(_agent_signals["manipulator_stage"])
+    except Exception:
+        pass  # silently skip — existing behavior fully preserved
+
     note = _generate_note(label, burst, pattern, state.bot_confidence)
 
     return {
@@ -185,6 +236,9 @@ def generate_step_from_state(
         "severity": round(severity, 4),
         "health": round(health, 4),
         "note": note,
+        # [MULTI-AGENT ADDITION]
+        "active_agents": getattr(state, "_active_agents", []),
+        "manipulator_stage": getattr(state, "_manipulator_stage", 1),
     }
 
 
