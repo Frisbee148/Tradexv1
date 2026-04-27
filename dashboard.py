@@ -95,6 +95,9 @@ class EpisodeState:
         self.amm_volatility: list[float] = []
         self.amm_health: list[float] = []
         self.signal_matrix: list[list[float]] = []  # for heatmap
+        # Surveillance-grade per-step records (UI-only, fed by env.debug_snapshot.ground_truth)
+        self.step_records: list[dict[str, Any]] = []
+        self.final_score: float = 0.0
         self.done = False
         self.task_name = ""
 
@@ -122,6 +125,126 @@ SIGNAL_NAMES = [
 
 
 # ---------------------------------------------------------------------------
+# Surveillance episode log — text renderer
+# ---------------------------------------------------------------------------
+
+# Base block height used as the "first block" of an episode. Real DeFi-style
+# value so logs look authentic; pure cosmetic, not consumed anywhere else.
+_BASE_BLOCK_HEIGHT = 18_500_000
+
+OUTCOME_EMOJI = {
+    "CORRECT": "✅",
+    "CORRECT ALLOW": "✅",
+    "FALSE POSITIVE": "❌",
+    "MISSED THREAT": "❌",
+}
+
+
+def render_bar(value: float) -> str:
+    """10-char unicode progress bar for a 0..1 indicator."""
+    value = max(0.0, min(1.0, float(value)))
+    filled = round(value * 10)
+    return "█" * filled + "░" * (10 - filled)
+
+
+def _classify_outcome(threat_present: bool, action: str) -> str:
+    aggressive = action in ("FLAG", "BLOCK")
+    if threat_present:
+        return "CORRECT" if aggressive else "MISSED THREAT"
+    return "FALSE POSITIVE" if aggressive else "CORRECT ALLOW"
+
+
+def _build_step_record(
+    *,
+    step: int,
+    block_number: int,
+    ground_truth: dict[str, Any],
+    burst_indicator: float,
+    pattern_indicator: float,
+    action: str,
+    reward: float,
+) -> dict[str, Any]:
+    active_agents = list(ground_truth.get("active_agents") or [])
+    threat_present = bool(ground_truth.get("threat_present", "ManipulatorBot" in active_agents))
+    outcome = _classify_outcome(threat_present, action)
+    return {
+        "step": int(step),
+        "block_number": int(block_number),
+        "active_agents": active_agents,
+        "threat_present": threat_present,
+        "burst_indicator": float(burst_indicator),
+        "pattern_indicator": float(pattern_indicator),
+        "action": action,
+        "reward": float(reward),
+        "correct": outcome in ("CORRECT", "CORRECT ALLOW"),
+        "outcome_label": outcome,
+    }
+
+
+def _render_step_entry(rec: dict[str, Any]) -> str:
+    agents_str = " · ".join(rec["active_agents"]) if rec["active_agents"] else "(none)"
+    burst = rec["burst_indicator"]
+    pattern = rec["pattern_indicator"]
+    emoji = OUTCOME_EMOJI.get(rec["outcome_label"], "·")
+    return (
+        f"Step {rec['step']} | Block #{rec['block_number']}\n"
+        "─────────────────────────────────────────\n"
+        "SIMULATION\n"
+        f"  Active agents : {agents_str}\n"
+        f"  burst         : {burst:.2f}  {render_bar(burst)}\n"
+        f"  pattern       : {pattern:.2f}  {render_bar(pattern)}\n"
+        "\n"
+        "SURVEILLANCE\n"
+        f"  Action : {rec['action']:<7}    {emoji} {rec['outcome_label']}    "
+        f"Reward: {rec['reward']:+.2f}\n"
+    )
+
+
+def _render_episode_summary_block(
+    records: list[dict[str, Any]],
+    task_name: str,
+    final_score: float,
+) -> str:
+    threat_steps = sum(r["threat_present"] for r in records)
+    clean_steps = len(records) - threat_steps
+    correct_blocks = sum(r["outcome_label"] == "CORRECT" for r in records)
+    false_positives = sum(r["outcome_label"] == "FALSE POSITIVE" for r in records)
+    missed_threats = sum(r["outcome_label"] == "MISSED THREAT" for r in records)
+    precision = (
+        correct_blocks / (correct_blocks + false_positives)
+        if (correct_blocks + false_positives) > 0
+        else 0.0
+    )
+    recall = correct_blocks / threat_steps if threat_steps > 0 else 0.0
+
+    return (
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"EPISODE SUMMARY | {task_name}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Total steps     : {len(records)}\n"
+        f"Threat steps    : {threat_steps}   (ManipulatorBot active)\n"
+        f"Clean steps     : {clean_steps}    (organic only)\n"
+        "\n"
+        f"Correct blocks  : {correct_blocks}  ✅\n"
+        f"False positives : {false_positives}  ❌\n"
+        f"Missed threats  : {missed_threats}   ❌\n"
+        "\n"
+        f"Precision : {precision:.2f}\n"
+        f"Recall    : {recall:.2f}\n"
+        f"Score     : {final_score:.3f}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+def _render_episode_log(state: "EpisodeState") -> str:
+    if not state.step_records:
+        return ""
+    parts = [_render_step_entry(rec) for rec in state.step_records]
+    parts.append(_render_episode_summary_block(state.step_records, state.task_name, state.final_score))
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Episode runner
 # ---------------------------------------------------------------------------
 
@@ -130,7 +253,7 @@ def _empty_outputs(message: str) -> tuple:
     empty_fig = _empty_plot(message)
     return (
         empty_fig, empty_fig, empty_fig, empty_fig,
-        empty_fig, empty_fig, f"**Error:** {message}", [], empty_fig,
+        empty_fig, empty_fig, f"**Error:** {message}", "", empty_fig,
     )
 
 
@@ -204,6 +327,14 @@ def run_full_episode(task_name: str, policy: str, seed: int | None) -> tuple:
 
         pre_snap = env.debug_snapshot()
         label = pre_snap["current_step"]["label"] if pre_snap["current_step"] else "normal"
+        ground_truth = pre_snap.get("ground_truth") or {
+            "active_agents": [],
+            "threat_present": label == "suspicious",
+        }
+        # Capture the indicators describing the step the agent is acting on,
+        # *before* env.step() advances simulation state.
+        pre_burst = float((pre_snap.get("current_step") or {}).get("burst_indicator") or 0.0)
+        pre_pattern = float((pre_snap.get("current_step") or {}).get("pattern_indicator") or 0.0)
 
         obs = env.step(SurveillanceAction(action_type=action))
         step_count += 1
@@ -235,8 +366,19 @@ def run_full_episode(task_name: str, policy: str, seed: int | None) -> tuple:
             "manipulation": obs.manipulation_score,
         })
 
+        state.step_records.append(_build_step_record(
+            step=step_count,
+            block_number=_BASE_BLOCK_HEIGHT + step_count,
+            ground_truth=ground_truth,
+            burst_indicator=pre_burst,
+            pattern_indicator=pre_pattern,
+            action=action,
+            reward=reward,
+        ))
+
     grade = env.grade()
     state.done = True
+    state.final_score = float(grade.get("score", 0.0))
 
     return (
         _make_reward_chart(state),
@@ -246,7 +388,7 @@ def run_full_episode(task_name: str, policy: str, seed: int | None) -> tuple:
         _make_grade_chart(grade),
         _make_confusion_chart(state),
         _make_episode_summary(state, grade, policy, seed),
-        _make_step_table(state),
+        _render_episode_log(state),
         _make_amm_gauges(state),
     )
 
@@ -698,22 +840,6 @@ def _score_bar(score: float) -> str:
     filled = int(score * 20)
     empty = 20 - filled
     return f"`[{'=' * filled}{'-' * empty}]` {score:.1%}"
-
-
-def _make_step_table(state: EpisodeState) -> list[list]:
-    rows = []
-    for h in state.step_history:
-        rows.append([
-            h["step"],
-            h["action"],
-            h["label"],
-            f"{h['reward']:.3f}",
-            f"{h['burst']:.3f}",
-            f"{h['pattern']:.3f}",
-            f"{h['suspicion']:.3f}",
-            f"{h['manipulation']:.3f}",
-        ])
-    return rows
 
 
 def _make_amm_gauges(state: EpisodeState) -> go.Figure:
@@ -1183,12 +1309,19 @@ def build_app() -> gr.Blocks:
                     with gr.Column(scale=1):
                         confusion_chart = gr.Plot(label="Action vs Truth")
 
-                gr.Markdown("#### Step-by-Step Log")
-                step_table = gr.Dataframe(
-                    headers=["Step", "Action", "Label", "Reward", "Burst", "Pattern", "Suspicion", "Manipulation"],
-                    datatype=["number", "str", "str", "str", "str", "str", "str", "str"],
+                gr.Markdown(
+                    "#### Episode Log\n"
+                    "_Per-step surveillance trace with simulation ground truth "
+                    "(active agents, threat presence) and the agent's response. "
+                    "Cleared and rebuilt on every run._"
+                )
+                episode_log = gr.Code(
+                    value="",
+                    label="Surveillance trace",
+                    language=None,
                     interactive=False,
-                    wrap=True,
+                    lines=24,
+                    elem_id="episode-log",
                 )
 
                 run_btn.click(
@@ -1196,7 +1329,7 @@ def build_app() -> gr.Blocks:
                     inputs=[task_dd, policy_dd, seed_input],
                     outputs=[
                         reward_chart, action_chart, signal_heatmap, amm_chart,
-                        grade_chart, confusion_chart, summary_md, step_table, amm_gauges,
+                        grade_chart, confusion_chart, summary_md, episode_log, amm_gauges,
                     ],
                     queue=False,
                 )

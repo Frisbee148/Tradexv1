@@ -171,6 +171,15 @@ class MarketSurveillanceEnvironment(Environment[SurveillanceAction, Surveillance
                 "scenario_note": step_data.note,
             }
 
+        # Internal-only ground truth — never exposed to the surveillance LLM.
+        # Mirrors which simulation agents drove the *current* upcoming step.
+        active_agents = list(getattr(self._amm, "_active_agents", []) or [])
+        ground_truth = {
+            "active_agents": active_agents,
+            "threat_present": "ManipulatorBot" in active_agents,
+            "manipulator_stage": int(getattr(self._amm, "_manipulator_stage", 1)),
+        }
+
         return {
             "episode_id": self._state.episode_id,
             "task_name": self._task_name,
@@ -188,6 +197,7 @@ class MarketSurveillanceEnvironment(Environment[SurveillanceAction, Surveillance
                 "step": self._amm.step,
             },
             "current_step": current_step,
+            "ground_truth": ground_truth,
         }
 
     def _reward_for_action(self, action_type: str, step_data, step_num: int, max_steps: int) -> float:

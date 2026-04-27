@@ -4,3 +4,5 @@ numpy>=1.26.0
 openenv-core[core]>=0.2.2
 fastapi>=0.115.0
 uvicorn>=0.24.0
+openai>=2.30.0
+python-dotenv>=1.0.0
